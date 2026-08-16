@@ -33,6 +33,8 @@ type stream struct {
     openOK chan error
     closeOnce sync.Once
     closed chan struct{}
+    readMu sync.Mutex
+    pending []byte
 }
 
 func Dial(cfg Config) (*Session, error) {
@@ -63,7 +65,13 @@ func (s *Session) Open(target string)(net.Conn,error){
     select{case err:=<-st.openOK:if err!=nil{s.remove(id);return nil,err};return st,nil;case <-s.done:s.remove(id);return nil,io.EOF;case <-time.After(15*time.Second):s.remove(id);return nil,fmt.Errorf("open timeout")}
 }
 func(s *Session)remove(id uint32){s.mu.Lock();delete(s.streams,id);s.mu.Unlock()}
-func(st *stream)Read(p []byte)(int,error){select{case b:=<-st.data:if len(b)==0{return 0,io.EOF};return copy(p,b),nil;case <-st.closed:return 0,io.EOF;case <-st.sess.done:return 0,io.EOF}}
+func(st *stream)Read(p []byte)(int,error){
+    st.readMu.Lock(); defer st.readMu.Unlock()
+    for len(st.pending)==0 {
+        select { case b:=<-st.data: st.pending=b; case <-st.closed:return 0,io.EOF; case <-st.sess.done:return 0,io.EOF }
+    }
+    n:=copy(p,st.pending);st.pending=st.pending[n:];return n,nil
+}
 func(st *stream)Write(p []byte)(int,error){select{case <-st.closed:return 0,io.ErrClosedPipe;default:};if err:=st.sess.write(protocol.Frame{Type:protocol.TypeData,StreamID:st.id,Payload:append([]byte(nil),p...)});err!=nil{return 0,err};return len(p),nil}
 func(st *stream)Close()error{st.closeOnce.Do(func(){close(st.closed);_=st.sess.write(protocol.Frame{Type:protocol.TypeClose,StreamID:st.id});st.sess.remove(st.id)});return nil}
 func(st *stream)LocalAddr()net.Addr{return st.sess.c.LocalAddr()};func(st *stream)RemoteAddr()net.Addr{return st.sess.c.RemoteAddr()};func(st *stream)SetDeadline(t time.Time)error{return st.sess.c.SetDeadline(t)};func(st *stream)SetReadDeadline(t time.Time)error{return st.sess.c.SetReadDeadline(t)};func(st *stream)SetWriteDeadline(t time.Time)error{return st.sess.c.SetWriteDeadline(t)}
