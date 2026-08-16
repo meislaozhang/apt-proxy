@@ -7,6 +7,7 @@ import (
     "io"
     "net"
     "sync"
+    "sync/atomic"
     "time"
 
     "github.com/meislaozhang/apt-proxy/internal/protocol"
@@ -14,26 +15,55 @@ import (
 
 type Config struct { ServerAddr, ServerName, Token string; InsecureSkipVerify bool }
 
-type Session struct { c *tls.Conn; r *bufio.Reader; mu sync.Mutex }
+type Session struct {
+    c *tls.Conn
+    r *bufio.Reader
+    writeMu sync.Mutex
+    mu sync.Mutex
+    streams map[uint32]*stream
+    nextID uint32
+    done chan struct{}
+    once sync.Once
+}
+
+type stream struct {
+    sess *Session
+    id uint32
+    data chan []byte
+    openOK chan error
+    closeOnce sync.Once
+    closed chan struct{}
+}
 
 func Dial(cfg Config) (*Session, error) {
     c, err := tls.DialWithDialer(&net.Dialer{Timeout:10*time.Second}, "tcp", cfg.ServerAddr, &tls.Config{MinVersion:tls.VersionTLS13, ServerName:cfg.ServerName, InsecureSkipVerify:cfg.InsecureSkipVerify})
     if err != nil { return nil, err }
-    s := &Session{c:c, r:bufio.NewReader(c)}
+    s := &Session{c:c, r:bufio.NewReader(c), streams:make(map[uint32]*stream), nextID:1, done:make(chan struct{})}
     if err := s.write(protocol.Frame{Type:protocol.TypeAuth, Payload:[]byte(cfg.Token)}); err != nil { _=c.Close(); return nil,err }
-    f,err := protocol.ReadFrame(s.r); if err != nil || f.Type != protocol.TypeAuthOK { _=c.Close(); return nil,fmt.Errorf("authentication failed") }
+    f,err:=protocol.ReadFrame(s.r); if err!=nil || f.Type!=protocol.TypeAuthOK { _=c.Close(); return nil,fmt.Errorf("authentication failed") }
+    go s.readLoop()
     return s,nil
 }
-func (s *Session) write(f protocol.Frame) error { s.mu.Lock(); defer s.mu.Unlock(); return f.Write(s.c) }
-func (s *Session) Close() error { return s.c.Close() }
-
-func (s *Session) Open(target string) (net.Conn,error) {
-    if err:=s.write(protocol.Frame{Type:protocol.TypeOpen,StreamID:1,Payload:[]byte(target)}); err!=nil { return nil,err }
-    for { f,err:=protocol.ReadFrame(s.r); if err!=nil{return nil,err}; if f.StreamID!=1{continue}; if f.Type==protocol.TypeOpenOK{return &stream{sess:s},nil}; return nil,fmt.Errorf("open failed: %s",f.Payload) }
+func (s *Session) write(f protocol.Frame) error { s.writeMu.Lock(); defer s.writeMu.Unlock(); return f.Write(s.c) }
+func (s *Session) readLoop() {
+    defer s.shutdown()
+    for { f,err:=protocol.ReadFrame(s.r); if err!=nil{return}; s.mu.Lock(); st:=s.streams[f.StreamID]; s.mu.Unlock(); if st==nil{continue}; switch f.Type {
+    case protocol.TypeOpenOK: select{case st.openOK<-nil:default:}
+    case protocol.TypeError: select{case st.openOK<-fmt.Errorf("remote: %s",f.Payload):default:}
+    case protocol.TypeData: b:=append([]byte(nil),f.Payload...); select{case st.data<-b:case <-st.closed:}
+    case protocol.TypeClose: st.closeOnce.Do(func(){close(st.closed)})
+    } }
 }
-
-type stream struct { sess *Session; mu sync.Mutex; closed bool }
-func (s *stream) Read(p []byte)(int,error){ for { f,e:=protocol.ReadFrame(s.sess.r); if e!=nil{return 0,e}; if f.StreamID!=1{continue}; switch f.Type{case protocol.TypeData:return copy(p,f.Payload),nil;case protocol.TypeClose:return 0,io.EOF;case protocol.TypeError:return 0,fmt.Errorf("remote: %s",f.Payload)} } }
-func (s *stream) Write(p []byte)(int,error){ if err:=s.sess.write(protocol.Frame{Type:protocol.TypeData,StreamID:1,Payload:append([]byte(nil),p...)});err!=nil{return 0,err};return len(p),nil }
-func (s *stream) Close()error{s.mu.Lock();defer s.mu.Unlock();if s.closed{return nil};s.closed=true;return s.sess.write(protocol.Frame{Type:protocol.TypeClose,StreamID:1})}
-func(s *stream)LocalAddr()net.Addr{return s.sess.c.LocalAddr()};func(s *stream)RemoteAddr()net.Addr{return s.sess.c.RemoteAddr()};func(s *stream)SetDeadline(t time.Time)error{return s.sess.c.SetDeadline(t)};func(s *stream)SetReadDeadline(t time.Time)error{return s.sess.c.SetReadDeadline(t)};func(s *stream)SetWriteDeadline(t time.Time)error{return s.sess.c.SetWriteDeadline(t)}
+func (s *Session) shutdown(){ s.once.Do(func(){close(s.done);_=s.c.Close();s.mu.Lock();defer s.mu.Unlock();for _,st:=range s.streams{st.closeOnce.Do(func(){close(st.closed)})}}) }
+func (s *Session) Close() error { s.shutdown(); return nil }
+func (s *Session) Open(target string)(net.Conn,error){
+    id:=atomic.AddUint32(&s.nextID,1); st:=&stream{sess:s,id:id,data:make(chan []byte,16),openOK:make(chan error,1),closed:make(chan struct{})}
+    s.mu.Lock();s.streams[id]=st;s.mu.Unlock()
+    if err:=s.write(protocol.Frame{Type:protocol.TypeOpen,StreamID:id,Payload:[]byte(target)});err!=nil{s.remove(id);return nil,err}
+    select{case err:=<-st.openOK:if err!=nil{s.remove(id);return nil,err};return st,nil;case <-s.done:s.remove(id);return nil,io.EOF;case <-time.After(15*time.Second):s.remove(id);return nil,fmt.Errorf("open timeout")}
+}
+func(s *Session)remove(id uint32){s.mu.Lock();delete(s.streams,id);s.mu.Unlock()}
+func(st *stream)Read(p []byte)(int,error){select{case b:=<-st.data:if len(b)==0{return 0,io.EOF};return copy(p,b),nil;case <-st.closed:return 0,io.EOF;case <-st.sess.done:return 0,io.EOF}}
+func(st *stream)Write(p []byte)(int,error){select{case <-st.closed:return 0,io.ErrClosedPipe;default:};if err:=st.sess.write(protocol.Frame{Type:protocol.TypeData,StreamID:st.id,Payload:append([]byte(nil),p...)});err!=nil{return 0,err};return len(p),nil}
+func(st *stream)Close()error{st.closeOnce.Do(func(){close(st.closed);_=st.sess.write(protocol.Frame{Type:protocol.TypeClose,StreamID:st.id});st.sess.remove(st.id)});return nil}
+func(st *stream)LocalAddr()net.Addr{return st.sess.c.LocalAddr()};func(st *stream)RemoteAddr()net.Addr{return st.sess.c.RemoteAddr()};func(st *stream)SetDeadline(t time.Time)error{return st.sess.c.SetDeadline(t)};func(st *stream)SetReadDeadline(t time.Time)error{return st.sess.c.SetReadDeadline(t)};func(st *stream)SetWriteDeadline(t time.Time)error{return st.sess.c.SetWriteDeadline(t)}
