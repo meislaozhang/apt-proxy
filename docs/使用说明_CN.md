@@ -127,7 +127,7 @@ curl --proxy socks5h://127.0.0.1:1080 https://example.com/
 推荐：
 
 ```text
--client -insecure-skip-verify=false
+-insecure-skip-verify=false
 -server-name 与证书 SAN（Subject Alternative Name，主题备用名称）匹配
 ```
 
@@ -204,7 +204,7 @@ go test ./...
 go test -race ./...
 go vet ./...
 go build ./cmd/apt-server
-ngo build ./cmd/apt-client
+go build ./cmd/apt-client
 ```
 
 完整功能完成并通过独立安全审查之前，版本应保持 Experimental（实验性）状态。
