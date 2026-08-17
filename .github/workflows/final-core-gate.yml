@@ -1,0 +1,39 @@
+name: final-core-gate
+
+on:
+  push:
+    branches:
+      - main
+      - 'test/final-core-gate-*'
+  pull_request:
+
+jobs:
+  final-core-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.2'
+          cache: true
+
+      - name: Unit and integration tests
+        run: go test -timeout 3m ./...
+
+      - name: Race tests
+        run: go test -timeout 6m -race ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build server
+        run: go build ./cmd/apt-server
+
+      - name: Build client
+        run: go build ./cmd/apt-client
+
+      - name: Final core gate summary
+        run: |
+          echo 'TCP core gate completed: tests, race, vet, and both binaries passed.'
+          echo 'External hosts, Cloudflare Tunnel, and IP-specific netem targets are intentionally excluded.'
