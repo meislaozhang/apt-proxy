@@ -8,14 +8,42 @@ import (
 )
 
 const (
-    Version    byte = 1
-    TypeAuth   byte = 1
-    TypeAuthOK byte = 2
-    TypeOpen   byte = 3
-    TypeOpenOK byte = 4
-    TypeData   byte = 5
-    TypeClose  byte = 6
-    TypeError  byte = 7
+    // Version is the wire-format major version. A major bump is reserved for
+    // incompatible framing changes; new features should use capabilities.
+    Version byte = 1
+
+    TypeAuth       byte = 1
+    TypeAuthOK     byte = 2
+    TypeOpen       byte = 3
+    TypeOpenOK     byte = 4
+    TypeData       byte = 5
+    TypeClose      byte = 6
+    TypeError      byte = 7
+    TypeWindowUpdate byte = 8
+    TypePing       byte = 9
+    TypePong       byte = 10
+    TypeReset      byte = 11
+    TypeHalfClose  byte = 12
+    TypeDatagram   byte = 13
+    TypeGoAway     byte = 14
+    TypeHello      byte = 15
+    TypeHelloOK    byte = 16
+)
+
+const (
+    FlagFIN byte = 1 << iota
+    FlagACK
+    FlagDatagram
+)
+
+const (
+    CapabilityFlowControl uint64 = 1 << iota
+    CapabilityDatagram
+    CapabilityHalfClose
+    CapabilityKeepalive
+    CapabilityConnectionMigration
+    CapabilityConnectIP
+    CapabilityConnectUDP
 )
 
 const MaxPayload = 1 << 20
