@@ -23,7 +23,23 @@ func TestResetClearsStreamLifecycleState(t *testing.T) {
 		halfClosed:  map[uint32]uint8{7: 3},
 	}
 
-	ss.reset(7)
+	resetDone := make(chan struct{})
+	go func() {
+		ss.reset(7)
+		close(resetDone)
+	}()
+
+	// serverSession.write uses net.Pipe, so the peer must read concurrently;
+	// otherwise reset() would block before the lifecycle state can be checked.
+	f, err := protocol.ReadFrame(bufio.NewReader(clientConn))
+	if err != nil {
+		t.Fatalf("read reset frame: %v", err)
+	}
+	if f.Type != protocol.TypeReset || f.StreamID != 7 {
+		t.Fatalf("got frame type=%v stream=%d, want RESET stream=7", f.Type, f.StreamID)
+	}
+
+	<-resetDone
 
 	ss.mu.Lock()
 	_, streamExists := ss.streams[7]
@@ -32,14 +48,6 @@ func TestResetClearsStreamLifecycleState(t *testing.T) {
 	ss.mu.Unlock()
 	if streamExists || windowExists || halfCloseExists {
 		t.Fatal("reset did not clear stream lifecycle state")
-	}
-
-	f, err := protocol.ReadFrame(bufio.NewReader(clientConn))
-	if err != nil {
-		t.Fatalf("read reset frame: %v", err)
-	}
-	if f.Type != protocol.TypeReset || f.StreamID != 7 {
-		t.Fatalf("got frame type=%v stream=%d, want RESET stream=7", f.Type, f.StreamID)
 	}
 
 	if _, err := originPeer.Write([]byte("x")); err == nil {
