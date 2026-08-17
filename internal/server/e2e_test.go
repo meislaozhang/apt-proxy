@@ -21,24 +21,43 @@ import (
 
 func TestE2ETCPMultiplexing(t *testing.T) {
     certFile, keyFile := testCertificate(t)
-    defer os.Remove(certFile); defer os.Remove(keyFile)
+    defer os.Remove(certFile)
+    defer os.Remove(keyFile)
 
     echoLn, err := net.Listen("tcp", "127.0.0.1:0")
     if err != nil { t.Fatal(err) }
     defer echoLn.Close()
     go func() {
-        for { c, err := echoLn.Accept(); if err != nil { return }; go func(c net.Conn) { defer c.Close(); _, _ = io.Copy(c, c) }(c) }
+        for {
+            c, err := echoLn.Accept()
+            if err != nil { return }
+            go func(c net.Conn) { defer c.Close(); _, _ = io.Copy(c, c) }(c)
+        }
     }()
 
-    aptLn, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{MinVersion: tls.VersionTLS13, Certificates: loadTestCertificate(t, certFile, keyFile)})
+    aptLn, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+        MinVersion:   tls.VersionTLS13,
+        Certificates: loadTestCertificate(t, certFile, keyFile),
+    })
     if err != nil { t.Fatal(err) }
-    defer aptLn.Close()
     srv := New(Config{Addr: aptLn.Addr().String(), Token: "e2e-token"})
     var wg sync.WaitGroup
     wg.Add(1)
-    go func() { defer wg.Done(); for { c, err := aptLn.Accept(); if err != nil { return }; go srv.handle(c) } }()
+    go func() {
+        defer wg.Done()
+        for {
+            c, err := aptLn.Accept()
+            if err != nil { return }
+            go srv.handle(c)
+        }
+    }()
 
-    sess, err := client.Dial(client.Config{ServerAddr: aptLn.Addr().String(), ServerName: "localhost", Token: "e2e-token", InsecureSkipVerify: true})
+    sess, err := client.Dial(client.Config{
+        ServerAddr:       aptLn.Addr().String(),
+        ServerName:       "localhost",
+        Token:             "e2e-token",
+        InsecureSkipVerify: true,
+    })
     if err != nil { t.Fatal(err) }
     defer sess.Close()
 
@@ -47,16 +66,22 @@ func TestE2ETCPMultiplexing(t *testing.T) {
         streams.Add(1)
         go func(i int) {
             defer streams.Done()
-            c, err := sess.Open(echoLn.Addr().String()); if err != nil { t.Error(err); return }; defer c.Close()
+            c, err := sess.Open(echoLn.Addr().String())
+            if err != nil { t.Error(err); return }
+            defer c.Close()
             msg := []byte(fmt.Sprintf("apt-e2e-stream-%d", i))
             if _, err := c.Write(msg); err != nil { t.Error(err); return }
-            _ = c.SetReadDeadline(time.Now().Add(3*time.Second))
+            _ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
             got := make([]byte, len(msg))
             if _, err := io.ReadFull(c, got); err != nil { t.Error(err); return }
             if string(got) != string(msg) { t.Errorf("stream %d got %q want %q", i, got, msg) }
         }(i)
     }
     streams.Wait()
+
+    // Stop the accept loop before waiting for it. The previous test waited
+    // first, which could never complete because the listener remained open.
+    _ = aptLn.Close()
     wg.Wait()
 }
 
