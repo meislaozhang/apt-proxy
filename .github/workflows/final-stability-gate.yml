@@ -1,0 +1,37 @@
+name: Final Repository Stability
+
+on:
+  push:
+    branches: [test/final-stability-gate-v1]
+  pull_request:
+    branches: [main]
+
+jobs:
+  stability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Functional stability
+        run: |
+          for i in 1 2 3; do
+            echo "=== functional $i/3 ==="
+            go test -timeout 90s ./...
+          done
+      - name: Race stability
+        run: |
+          for i in 1 2; do
+            echo "=== race $i/2 ==="
+            go test -race -timeout 120s ./...
+          done
+      - name: Vet
+        run: go vet ./...
+      - name: Build server
+        run: go build ./cmd/apt-server
+      - name: Build client
+        run: go build ./cmd/apt-client
+      - name: Final gate marker
+        run: echo FINAL_REPOSITORY_STABILITY_GATE_PASS
