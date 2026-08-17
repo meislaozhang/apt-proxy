@@ -4,7 +4,6 @@ import (
     "bufio"
     "context"
     "crypto/tls"
-    "encoding/binary"
     "fmt"
     "io"
     "net"
@@ -22,13 +21,13 @@ const (
 )
 
 type Config struct { ServerAddr, ServerName, Token string; InsecureSkipVerify bool }
-type Session struct { c *tls.Conn; r *bufio.Reader; writeMu sync.Mutex; mu sync.Mutex; streams map[uint32]*stream; nextID uint32; done chan struct{}; once sync.Once; send *sendAdmission }
+type Session struct { c *tls.Conn; r *bufio.Reader; writeMu sync.Mutex; mu sync.Mutex; streams map[uint32]*stream; nextID uint32; done chan struct{}; once sync.Once; send *protocol.BlockingFlowWindow }
 type stream struct { sess *Session; id uint32; data chan []byte; openOK chan error; closeOnce sync.Once; closed chan struct{}; readMu sync.Mutex; pending []byte; localWriteClosed atomic.Bool; send *protocol.BlockingFlowWindow }
 
 func Dial(cfg Config) (*Session,error) {
     c,err:=tls.DialWithDialer(&net.Dialer{Timeout:10*time.Second},"tcp",cfg.ServerAddr,&tls.Config{MinVersion:tls.VersionTLS13,ServerName:cfg.ServerName,InsecureSkipVerify:cfg.InsecureSkipVerify})
     if err!=nil{return nil,err}
-    send, err := newSendAdmission(defaultSessionWindow, defaultStreamWindow)
+    send, err := protocol.NewBlockingFlowWindow(defaultSessionWindow, defaultSessionWindow)
     if err != nil { _ = c.Close(); return nil, err }
     s:=&Session{c:c,r:bufio.NewReader(c),streams:make(map[uint32]*stream),nextID:1,done:make(chan struct{}),send:send}
     if err:=s.write(protocol.Frame{Type:protocol.TypeAuth,Payload:[]byte(cfg.Token)});err!=nil{_ = c.Close();return nil,err}
@@ -43,9 +42,9 @@ func(s *Session)readLoop(){
     for{
         f,err:=protocol.ReadFrame(s.r);if err!=nil{return}
         if f.Type == protocol.TypeWindowUpdate {
-            n, ok := decodeWindowUpdate(f.Payload)
-            if !ok || n == 0 { continue }
-            if f.StreamID == 0 { _ = s.send.updateSession(n) } else {
+            n, ok := protocol.DecodeWindowUpdate(f.Payload)
+            if !ok { continue }
+            if f.StreamID == 0 { _ = s.send.Add(n) } else {
                 s.mu.Lock(); st:=s.streams[f.StreamID]; s.mu.Unlock()
                 if st != nil { _ = st.send.Add(n) }
             }
@@ -54,11 +53,6 @@ func(s *Session)readLoop(){
         s.mu.Lock();st:=s.streams[f.StreamID];s.mu.Unlock();if st==nil{continue}
         switch f.Type{case protocol.TypeOpenOK:select{case st.openOK<-nil:default:};case protocol.TypeError:select{case st.openOK<-fmt.Errorf("remote: %s",f.Payload):default:};case protocol.TypeData:b:=append([]byte(nil),f.Payload...);select{case st.data<-b:case <-st.closed:};case protocol.TypeClose,protocol.TypeReset:st.closeOnce.Do(func(){close(st.closed)})}
     }
-}
-
-func decodeWindowUpdate(p []byte) (uint64, bool) {
-    if len(p) != 8 { return 0, false }
-    return binary.BigEndian.Uint64(p), true
 }
 
 func(s *Session)shutdown(){s.once.Do(func(){close(s.done);_=s.c.Close();s.mu.Lock();defer s.mu.Unlock();for _,st:=range s.streams{st.closeOnce.Do(func(){close(st.closed)})}})}
@@ -87,7 +81,7 @@ func(st *stream)Write(p []byte)(int,error){
         ctx, cancel := context.WithCancel(context.Background())
         go func(){ select { case <-st.closed: cancel(); case <-st.sess.done: cancel(); case <-ctx.Done(): } }()
         if err:=st.send.Acquire(ctx,uint64(n));err!=nil{cancel();return written,err}
-        if err:=st.sess.send.acquire(ctx,uint64(n));err!=nil{_ = st.send.Add(uint64(n));cancel();return written,err}
+        if err:=st.sess.send.Acquire(ctx,uint64(n));err!=nil{_ = st.send.Add(uint64(n));cancel();return written,err}
         cancel()
         if err:=st.sess.write(protocol.Frame{Type:protocol.TypeData,StreamID:st.id,Payload:append([]byte(nil),p[written:written+n]...)});err!=nil{return written,err}
         written += n
