@@ -32,6 +32,15 @@ func TestFrameRoundTripMultipleStreams(t *testing.T) {
     }
 }
 
+func TestZeroPayloadFrameRoundTrip(t *testing.T) {
+    want := Frame{Type: TypeReset, StreamID: 7}
+    var b bytes.Buffer
+    if err := want.Write(&b); err != nil { t.Fatal(err) }
+    got, err := ReadFrame(bufio.NewReader(&b))
+    if err != nil { t.Fatal(err) }
+    if got.Type != want.Type || got.StreamID != want.StreamID || len(got.Payload) != 0 { t.Fatalf("got %#v want %#v", got, want) }
+}
+
 func TestFrameRejectsOversizedPayload(t *testing.T) {
     f := Frame{Type: TypeData, StreamID: 1, Payload: make([]byte, MaxPayload+1)}
     var b bytes.Buffer
