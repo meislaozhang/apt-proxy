@@ -1,0 +1,41 @@
+name: tcp-core-soak
+
+on:
+  push:
+    branches: [main, 'test/**']
+  pull_request:
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: true
+      - name: Repeated functional runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 10); do
+            echo "=== functional run ${i}/10 ==="
+            timeout 90s go test ./...
+          done
+      - name: Repeated race runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 3); do
+            echo "=== race run ${i}/3 ==="
+            timeout 120s go test -race ./...
+          done
+      - name: Static validation
+        run: go vet ./...
+      - name: Build server
+        run: go build ./cmd/apt-server
+      - name: Build client
+        run: go build ./cmd/apt-client
+      - name: Gate summary
+        run: echo 'TCP_CORE_SOAK_GATE_PASS'
