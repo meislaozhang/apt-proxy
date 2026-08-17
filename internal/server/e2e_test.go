@@ -53,34 +53,38 @@ func TestE2ETCPMultiplexing(t *testing.T) {
     }()
 
     sess, err := client.Dial(client.Config{
-        ServerAddr:       aptLn.Addr().String(),
-        ServerName:       "localhost",
+        ServerAddr:        aptLn.Addr().String(),
+        ServerName:        "localhost",
         Token:             "e2e-token",
         InsecureSkipVerify: true,
     })
     if err != nil { t.Fatal(err) }
     defer sess.Close()
 
-    var streams sync.WaitGroup
-    for i := 0; i < 8; i++ {
-        streams.Add(1)
+    const streams = 100
+    var streamsWG sync.WaitGroup
+    errCh := make(chan error, streams)
+    for i := 0; i < streams; i++ {
+        streamsWG.Add(1)
         go func(i int) {
-            defer streams.Done()
+            defer streamsWG.Done()
             c, err := sess.Open(echoLn.Addr().String())
-            if err != nil { t.Error(err); return }
+            if err != nil { errCh <- err; return }
             defer c.Close()
-            msg := []byte(fmt.Sprintf("apt-e2e-stream-%d", i))
-            if _, err := c.Write(msg); err != nil { t.Error(err); return }
-            _ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+            msg := []byte(fmt.Sprintf("apt-e2e-stream-%03d", i))
+            if _, err := c.Write(msg); err != nil { errCh <- err; return }
+            _ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
             got := make([]byte, len(msg))
-            if _, err := io.ReadFull(c, got); err != nil { t.Error(err); return }
-            if string(got) != string(msg) { t.Errorf("stream %d got %q want %q", i, got, msg) }
+            if _, err := io.ReadFull(c, got); err != nil { errCh <- err; return }
+            if string(got) != string(msg) { errCh <- fmt.Errorf("stream %d got %q want %q", i, got, msg) }
         }(i)
     }
-    streams.Wait()
+    streamsWG.Wait()
+    close(errCh)
+    for err := range errCh {
+        if err != nil { t.Error(err) }
+    }
 
-    // Stop the accept loop before waiting for it. The previous test waited
-    // first, which could never complete because the listener remained open.
     _ = aptLn.Close()
     wg.Wait()
 }
