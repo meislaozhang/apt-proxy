@@ -7,12 +7,15 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to publish'
-        required: false
-        default: ''
+        description: 'Release tag to publish (for example v1.0.1)'
+        required: true
+        default: 'v1.0.1'
 
 permissions:
   contents: write
+
+env:
+  GO_VERSION: '1.23.2'
 
 env:
   GO_VERSION: '1.23.2'
@@ -21,8 +24,22 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
+      - name: Determine release ref
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "ref=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
         with:
+          ref: ${{ steps.release.outputs.ref }}
           fetch-depth: 0
 
       - uses: actions/setup-go@v5
@@ -64,7 +81,7 @@ jobs:
 
             cp README.md LICENSE "$dir/"
             printf '%s\n' \
-              "APT Proxy ${GITHUB_REF_NAME:-manual}" \
+              "APT Proxy ${{ steps.release.outputs.tag }}" \
               "Target: ${label}" \
               "Commit: $(git rev-parse HEAD)" \
               > "$dir/BUILD-INFO.txt"
@@ -72,7 +89,7 @@ jobs:
             tar -C package -czf "dist/apt-proxy-${label}.tar.gz" "apt-proxy-${label}"
           }
 
-          # Linux targets: common server/desktop architectures plus router/embedded targets.
+          # Linux: common desktop/server architectures plus embedded/router targets.
           build_target linux-amd64 linux amd64
           build_target linux-386 linux 386
           build_target linux-arm64 linux arm64
@@ -88,7 +105,7 @@ jobs:
           build_target linux-ppc64le linux ppc64le
           build_target linux-s390x linux s390x
 
-          # Keep desktop binaries available as standalone files and archives.
+          # Windows and macOS desktop packages.
           for target in \
             'windows-amd64 windows amd64 .exe' \
             'windows-arm64 windows arm64 .exe' \
@@ -101,7 +118,7 @@ jobs:
             env GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags='-s -w' -o "$dir/apt-client${ext:-}" ./cmd/apt-client
             cp README.md LICENSE "$dir/"
             printf '%s\n' \
-              "APT Proxy ${GITHUB_REF_NAME:-manual}" \
+              "APT Proxy ${{ steps.release.outputs.tag }}" \
               "Target: ${label}" \
               "Commit: $(git rev-parse HEAD)" \
               > "$dir/BUILD-INFO.txt"
@@ -112,11 +129,23 @@ jobs:
             fi
           done
 
+          # Verify every archive contains both binaries and the documentation.
+          for archive in dist/*.tar.gz; do
+            tar -tzf "$archive" >/dev/null
+          done
+          for archive in dist/*.zip; do
+            unzip -tq "$archive"
+          done
+
+          # SHA256SUMS covers every release asset except itself.
           (cd dist && sha256sum * > SHA256SUMS)
+          sha256sum dist/SHA256SUMS
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          target_commitish: ${{ steps.release.outputs.ref }}
           generate_release_notes: true
           files: |
             dist/*
