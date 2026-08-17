@@ -7,12 +7,15 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to publish (for example v1.0.1)'
+        description: 'Release tag to publish (for example v1.0.2)'
         required: true
-        default: 'v1.0.1'
+        default: 'v1.0.2'
 
 permissions:
   contents: write
+
+env:
+  CGO_ENABLED: '0'
 
 jobs:
   release:
@@ -41,15 +44,13 @@ jobs:
           ref: ${{ steps.release.outputs.ref }}
           fetch-depth: 0
 
-      # The Ubuntu runner already includes Go. Avoid actions/setup-go here:
-      # GitHub's codeload endpoint can rate-limit action downloads (429/502),
-      # which otherwise prevents the job from reaching the build stage.
       - name: Check Go toolchain
         shell: bash
         run: |
           set -euo pipefail
           go version
           go version | grep -Eq 'go1\.(2[3-9]|[3-9][0-9])\.'
+          echo "CGO_ENABLED=$CGO_ENABLED"
 
       - name: Test
         run: |
@@ -62,38 +63,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           rm -rf dist package
           mkdir -p dist package
 
           build_target() {
-            local label="$1"
-            local goos="$2"
-            local goarch="$3"
-            local goarm="${4:-}"
-            local gomips="${5:-}"
-
+            local label="$1" goos="$2" goarch="$3" goarm="${4:-}" gomips="${5:-}"
             local dir="package/apt-proxy-${label}"
             mkdir -p "$dir"
-
-            local envs=("GOOS=$goos" "GOARCH=$goarch")
+            local envs=("CGO_ENABLED=0" "GOOS=$goos" "GOARCH=$goarch")
             [[ -n "$goarm" ]] && envs+=("GOARM=$goarm")
             [[ -n "$gomips" ]] && envs+=("GOMIPS=$gomips")
-
             env "${envs[@]}" go build -trimpath -ldflags='-s -w' -o "$dir/apt-server" ./cmd/apt-server
             env "${envs[@]}" go build -trimpath -ldflags='-s -w' -o "$dir/apt-client" ./cmd/apt-client
-
             cp README.md LICENSE "$dir/"
-            printf '%s\n' \
-              "APT Proxy ${{ steps.release.outputs.tag }}" \
-              "Target: ${label}" \
-              "Commit: $(git rev-parse HEAD)" \
-              > "$dir/BUILD-INFO.txt"
-
+            printf '%s\n' "APT Proxy ${{ steps.release.outputs.tag }}" "Target: ${label}" "Commit: $(git rev-parse HEAD)" "CGO_ENABLED: 0" > "$dir/BUILD-INFO.txt"
             tar -C package -czf "dist/apt-proxy-${label}.tar.gz" "apt-proxy-${label}"
           }
 
-          # Linux targets, including embedded/router architectures.
           build_target linux-amd64 linux amd64
           build_target linux-386 linux 386
           build_target linux-arm64 linux arm64
@@ -109,7 +95,6 @@ jobs:
           build_target linux-ppc64le linux ppc64le
           build_target linux-s390x linux s390x
 
-          # Windows and macOS desktop packages.
           for target in \
             'windows-amd64 windows amd64 .exe' \
             'windows-arm64 windows arm64 .exe' \
@@ -118,14 +103,10 @@ jobs:
             read -r label goos goarch ext <<< "$target"
             dir="package/apt-proxy-${label}"
             mkdir -p "$dir"
-            env GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags='-s -w' -o "$dir/apt-server${ext:-}" ./cmd/apt-server
-            env GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags='-s -w' -o "$dir/apt-client${ext:-}" ./cmd/apt-client
+            env CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags='-s -w' -o "$dir/apt-server${ext:-}" ./cmd/apt-server
+            env CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags='-s -w' -o "$dir/apt-client${ext:-}" ./cmd/apt-client
             cp README.md LICENSE "$dir/"
-            printf '%s\n' \
-              "APT Proxy ${{ steps.release.outputs.tag }}" \
-              "Target: ${label}" \
-              "Commit: $(git rev-parse HEAD)" \
-              > "$dir/BUILD-INFO.txt"
+            printf '%s\n' "APT Proxy ${{ steps.release.outputs.tag }}" "Target: ${label}" "Commit: $(git rev-parse HEAD)" "CGO_ENABLED: 0" > "$dir/BUILD-INFO.txt"
             if [[ "$goos" == 'windows' ]]; then
               (cd package && zip -qr "../dist/apt-proxy-${label}.zip" "apt-proxy-${label}")
             else
@@ -133,15 +114,16 @@ jobs:
             fi
           done
 
-          # Verify every archive before publishing.
-          for archive in dist/*.tar.gz; do
-            tar -tzf "$archive" >/dev/null
-          done
-          for archive in dist/*.zip; do
-            unzip -tq "$archive"
+          for binary in package/*/apt-server package/*/apt-client; do
+            if file "$binary" | grep -q 'dynamically linked'; then
+              echo "ERROR: dynamically linked binary detected: $binary"
+              file "$binary"
+              exit 1
+            fi
           done
 
-          # SHA256SUMS covers every release asset except itself.
+          for archive in dist/*.tar.gz; do tar -tzf "$archive" >/dev/null; done
+          for archive in dist/*.zip; do unzip -tq "$archive"; done
           (cd dist && sha256sum * > SHA256SUMS)
           sha256sum dist/SHA256SUMS
 
@@ -153,13 +135,9 @@ jobs:
           set -euo pipefail
           tag="${{ steps.release.outputs.tag }}"
           target="${{ steps.release.outputs.ref }}"
-
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "Release $tag already exists; replacing assets."
             gh release upload "$tag" dist/* --clobber
           else
-            gh release create "$tag" dist/* \
-              --target "$target" \
-              --title "APT Proxy $tag" \
-              --generate-notes
+            gh release create "$tag" dist/* --target "$target" --title "APT Proxy $tag" --generate-notes
           fi
