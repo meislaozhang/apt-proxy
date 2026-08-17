@@ -17,9 +17,6 @@ permissions:
 env:
   GO_VERSION: '1.23.2'
 
-env:
-  GO_VERSION: '1.23.2'
-
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -30,7 +27,12 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            tag="${{ inputs.tag }}"
+            if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Invalid release tag: $tag"
+              exit 1
+            fi
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
             echo "ref=main" >> "$GITHUB_OUTPUT"
           else
             echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
@@ -129,7 +131,7 @@ jobs:
             fi
           done
 
-          # Verify every archive contains both binaries and the documentation.
+          # Verify every archive can be read before publishing.
           for archive in dist/*.tar.gz; do
             tar -tzf "$archive" >/dev/null
           done
