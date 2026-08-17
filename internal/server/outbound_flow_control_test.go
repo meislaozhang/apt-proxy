@@ -42,6 +42,7 @@ func TestPumpWaitsForSessionWindow(t *testing.T) {
 		streams: map[uint32]net.Conn{streamID: origin},
 		send: sessionWindow,
 		streamSend: map[uint32]*protocol.BlockingFlowWindow{streamID: streamWindow},
+		halfClosed: map[uint32]uint8{streamID: 0},
 	}
 
 	pumpDone := make(chan struct{})
