@@ -22,7 +22,7 @@ const (
 
 type Config struct { ServerAddr, ServerName, Token string; InsecureSkipVerify bool }
 type Session struct { c *tls.Conn; r *bufio.Reader; writeMu sync.Mutex; mu sync.Mutex; streams map[uint32]*stream; nextID uint32; done chan struct{}; once sync.Once; send *protocol.BlockingFlowWindow }
-type stream struct { sess *Session; id uint32; data chan []byte; openOK chan error; closeOnce sync.Once; closed chan struct{}; readMu sync.Mutex; pending []byte; localWriteClosed atomic.Bool; send *protocol.BlockingFlowWindow }
+type stream struct { sess *Session; id uint32; data chan []byte; openOK chan error; closeOnce sync.Once; closed chan struct{}; readMu sync.Mutex; pending []byte; localWriteClosed atomic.Bool; remoteReadClosed atomic.Bool; send *protocol.BlockingFlowWindow }
 
 func Dial(cfg Config) (*Session,error) {
     c,err:=tls.DialWithDialer(&net.Dialer{Timeout:10*time.Second},"tcp",cfg.ServerAddr,&tls.Config{MinVersion:tls.VersionTLS13,ServerName:cfg.ServerName,InsecureSkipVerify:cfg.InsecureSkipVerify})
@@ -51,7 +51,7 @@ func(s *Session)readLoop(){
             continue
         }
         s.mu.Lock();st:=s.streams[f.StreamID];s.mu.Unlock();if st==nil{continue}
-        switch f.Type{case protocol.TypeOpenOK:select{case st.openOK<-nil:default:};case protocol.TypeError:select{case st.openOK<-fmt.Errorf("remote: %s",f.Payload):default:};case protocol.TypeData:b:=append([]byte(nil),f.Payload...);select{case st.data<-b:case <-st.closed:};case protocol.TypeClose,protocol.TypeReset:st.closeOnce.Do(func(){close(st.closed)})}
+        switch f.Type{case protocol.TypeOpenOK:select{case st.openOK<-nil:default:};case protocol.TypeError:select{case st.openOK<-fmt.Errorf("remote: %s",f.Payload):default:};case protocol.TypeData:b:=append([]byte(nil),f.Payload...);select{case st.data<-b:case <-st.closed:};case protocol.TypeHalfClose:st.remoteReadClosed.Store(true);case protocol.TypeClose,protocol.TypeReset:st.closeOnce.Do(func(){close(st.closed)})}
     }
 }
 
@@ -69,7 +69,7 @@ func(s *Session)Open(target string)(net.Conn,error){
 }
 func(s *Session)remove(id uint32){s.mu.Lock();delete(s.streams,id);s.mu.Unlock()}
 
-func(st *stream)Read(p []byte)(int,error){st.readMu.Lock();defer st.readMu.Unlock();for len(st.pending)==0{select{case b:=<-st.data:st.pending=b;continue;default:};select{case b:=<-st.data:st.pending=b;case <-st.closed:return 0,io.EOF;case <-st.sess.done:return 0,io.EOF}};n:=copy(p,st.pending);st.pending=st.pending[n:];return n,nil}
+func(st *stream)Read(p []byte)(int,error){st.readMu.Lock();defer st.readMu.Unlock();for len(st.pending)==0{select{case b:=<-st.data:st.pending=b;continue;default:};if st.remoteReadClosed.Load(){return 0,io.EOF};select{case b:=<-st.data:st.pending=b;case <-st.closed:return 0,io.EOF;case <-st.sess.done:return 0,io.EOF;case <-func() chan struct{} { ch:=make(chan struct{}); if st.remoteReadClosed.Load(){close(ch)}; return ch }():return 0,io.EOF}};n:=copy(p,st.pending);st.pending=st.pending[n:];return n,nil}
 
 func(st *stream)Write(p []byte)(int,error){
     if st.localWriteClosed.Load(){return 0,io.ErrClosedPipe}
@@ -80,19 +80,10 @@ func(st *stream)Write(p []byte)(int,error){
         if uint64(n) > maxDataChunk { n = int(maxDataChunk) }
         ctx, cancel := context.WithCancel(context.Background())
         done := make(chan struct{})
-        go func() {
-            select {
-            case <-st.closed:
-                cancel()
-            case <-st.sess.done:
-                cancel()
-            case <-done:
-            }
-        }()
+        go func() { select { case <-st.closed: cancel(); case <-st.sess.done: cancel(); case <-done: } }()
         if err:=st.send.Acquire(ctx,uint64(n));err!=nil{close(done);cancel();return written,err}
         if err:=st.sess.send.Acquire(ctx,uint64(n));err!=nil{_ = st.send.Add(uint64(n));close(done);cancel();return written,err}
-        close(done)
-        cancel()
+        close(done);cancel()
         if err:=st.sess.write(protocol.Frame{Type:protocol.TypeData,StreamID:st.id,Payload:append([]byte(nil),p[written:written+n]...)});err!=nil{return written,err}
         written += n
     }
