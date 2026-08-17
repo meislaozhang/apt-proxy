@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -94,7 +95,7 @@ func TestE2EConcurrentLargeTransferIntegrity(t *testing.T) {
 				return
 			}
 			gotHash := sha256.New()
-			if _, err := io.Copy(gotHash, io.LimitReader(c, size)); err != nil {
+			if _, err := io.Copy(gotHash, io.LimitReader(c, int64(size))); err != nil {
 				errCh <- fmt.Errorf("stream %d read: %w", streamID, err)
 				return
 			}
