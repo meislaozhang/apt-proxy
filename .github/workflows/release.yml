@@ -50,14 +50,18 @@ jobs:
           set -euo pipefail
           go version
           go version | grep -Eq 'go1\.(2[3-9]|[3-9][0-9])\.'
-          echo "CGO_ENABLED=$CGO_ENABLED"
+          echo "Release build CGO_ENABLED=$CGO_ENABLED"
 
       - name: Test
+        shell: bash
         run: |
           set -euo pipefail
-          go test ./...
-          go test -race ./...
-          go vet ./...
+          echo '== go test (CGO disabled) =='
+          CGO_ENABLED=0 go test ./...
+          echo '== go test -race (CGO enabled for race detector) =='
+          CGO_ENABLED=1 go test -race ./...
+          echo '== go vet (CGO disabled) =='
+          CGO_ENABLED=0 go vet ./...
 
       - name: Build release artifacts
         shell: bash
