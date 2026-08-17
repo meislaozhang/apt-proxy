@@ -22,7 +22,7 @@ const (
 
 type Config struct { ServerAddr, ServerName, Token string; InsecureSkipVerify bool }
 type Session struct { c *tls.Conn; r *bufio.Reader; writeMu sync.Mutex; mu sync.Mutex; streams map[uint32]*stream; nextID uint32; done chan struct{}; once sync.Once; send *protocol.BlockingFlowWindow }
-type stream struct { sess *Session; id uint32; data chan []byte; openOK chan error; closeOnce sync.Once; closed chan struct{}; readMu sync.Mutex; pending []byte; localWriteClosed atomic.Bool; remoteReadClosed atomic.Bool; send *protocol.BlockingFlowWindow }
+type stream struct { sess *Session; id uint32; data chan []byte; openOK chan error; closeOnce sync.Once; closed chan struct{}; readMu sync.Mutex; pending []byte; localWriteClosed atomic.Bool; remoteReadClosed atomic.Bool; remoteReadDone chan struct{}; remoteReadOnce sync.Once; send *protocol.BlockingFlowWindow }
 
 func Dial(cfg Config) (*Session,error) {
     c,err:=tls.DialWithDialer(&net.Dialer{Timeout:10*time.Second},"tcp",cfg.ServerAddr,&tls.Config{MinVersion:tls.VersionTLS13,ServerName:cfg.ServerName,InsecureSkipVerify:cfg.InsecureSkipVerify})
@@ -51,25 +51,25 @@ func(s *Session)readLoop(){
             continue
         }
         s.mu.Lock();st:=s.streams[f.StreamID];s.mu.Unlock();if st==nil{continue}
-        switch f.Type{case protocol.TypeOpenOK:select{case st.openOK<-nil:default:};case protocol.TypeError:select{case st.openOK<-fmt.Errorf("remote: %s",f.Payload):default:};case protocol.TypeData:b:=append([]byte(nil),f.Payload...);select{case st.data<-b:case <-st.closed:};case protocol.TypeHalfClose:st.remoteReadClosed.Store(true);case protocol.TypeClose,protocol.TypeReset:st.closeOnce.Do(func(){close(st.closed)})}
+        switch f.Type{case protocol.TypeOpenOK:select{case st.openOK<-nil:default:};case protocol.TypeError:select{case st.openOK<-fmt.Errorf("remote: %s",f.Payload):default:};case protocol.TypeData:b:=append([]byte(nil),f.Payload...);select{case st.data<-b:case <-st.closed:};case protocol.TypeHalfClose:st.remoteReadClosed.Store(true);st.remoteReadOnce.Do(func(){close(st.remoteReadDone)});case protocol.TypeClose,protocol.TypeReset:st.closeOnce.Do(func(){close(st.closed)})}
     }
 }
 
-func(s *Session)shutdown(){s.once.Do(func(){close(s.done);_=s.c.Close();s.mu.Lock();defer s.mu.Unlock();for _,st:=range s.streams{st.closeOnce.Do(func(){close(st.closed)})}})}
+func(s *Session)shutdown(){s.once.Do(func(){close(s.done);_=s.c.Close();s.mu.Lock();defer s.mu.Unlock();for _,st:=range s.streams{st.closeOnce.Do(func(){close(st.closed)});st.remoteReadOnce.Do(func(){close(st.remoteReadDone)})}})}
 func(s *Session)Close()error{s.shutdown();return nil}
 
 func(s *Session)Open(target string)(net.Conn,error){
     id:=atomic.AddUint32(&s.nextID,1)
     streamWindow, err := protocol.NewBlockingFlowWindow(defaultStreamWindow, defaultStreamWindow)
     if err != nil { return nil, err }
-    st:=&stream{sess:s,id:id,data:make(chan []byte,16),openOK:make(chan error,1),closed:make(chan struct{}),send:streamWindow}
+    st:=&stream{sess:s,id:id,data:make(chan []byte,16),openOK:make(chan error,1),closed:make(chan struct{}),remoteReadDone:make(chan struct{}),send:streamWindow}
     s.mu.Lock();s.streams[id]=st;s.mu.Unlock()
     if err:=s.write(protocol.Frame{Type:protocol.TypeOpen,StreamID:id,Payload:[]byte(target)});err!=nil{s.remove(id);return nil,err}
     select{case err:=<-st.openOK:if err!=nil{s.remove(id);return nil,err};return st,nil;case <-s.done:s.remove(id);return nil,io.EOF;case <-time.After(15*time.Second):s.remove(id);return nil,fmt.Errorf("open timeout")}
 }
 func(s *Session)remove(id uint32){s.mu.Lock();delete(s.streams,id);s.mu.Unlock()}
 
-func(st *stream)Read(p []byte)(int,error){st.readMu.Lock();defer st.readMu.Unlock();for len(st.pending)==0{select{case b:=<-st.data:st.pending=b;continue;default:};if st.remoteReadClosed.Load(){return 0,io.EOF};select{case b:=<-st.data:st.pending=b;case <-st.closed:return 0,io.EOF;case <-st.sess.done:return 0,io.EOF;case <-func() chan struct{} { ch:=make(chan struct{}); if st.remoteReadClosed.Load(){close(ch)}; return ch }():return 0,io.EOF}};n:=copy(p,st.pending);st.pending=st.pending[n:];return n,nil}
+func(st *stream)Read(p []byte)(int,error){st.readMu.Lock();defer st.readMu.Unlock();for len(st.pending)==0{select{case b:=<-st.data:st.pending=b;continue;default:};if st.remoteReadClosed.Load(){return 0,io.EOF};select{case b:=<-st.data:st.pending=b;case <-st.closed:return 0,io.EOF;case <-st.sess.done:return 0,io.EOF;case <-st.remoteReadDone:return 0,io.EOF}};n:=copy(p,st.pending);st.pending=st.pending[n:];return n,nil}
 
 func(st *stream)Write(p []byte)(int,error){
     if st.localWriteClosed.Load(){return 0,io.ErrClosedPipe}
