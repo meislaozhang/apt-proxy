@@ -6,10 +6,13 @@ func TestFlowControllerRequiresBothWindows(t *testing.T) {
     f, err := NewFlowController(10, 100, 20, 100)
     if err != nil { t.Fatal(err) }
     if !f.TryReserve(10) { t.Fatal("expected reservation") }
-    if f.StreamAvailable() != 0 || f.SessionAvailable() != 10 { t.Fatalf("unexpected windows: stream=%d session=%d", f.StreamAvailable(), f.SessionAvailable()) }
+    if f.StreamAvailable() != 0 || f.SessionAvailable() != 10 {
+        t.Fatalf("unexpected windows: stream=%d session=%d", f.StreamAvailable(), f.SessionAvailable())
+    }
     if f.TryReserve(1) { t.Fatal("expected stream window to block") }
     if err := f.UpdateStream(10); err != nil { t.Fatal(err) }
-    if !f.TryReserve(11) { t.Fatal("expected session window to block only when request exceeds remaining credit") }
+    if f.TryReserve(11) { t.Fatal("expected session window to block") }
+    if !f.TryReserve(10) { t.Fatal("expected ten bytes to fit") }
 }
 
 func TestFlowControllerSessionBlocks(t *testing.T) {
