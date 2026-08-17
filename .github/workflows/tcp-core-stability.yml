@@ -1,0 +1,35 @@
+name: TCP Core Stability
+
+on:
+  push:
+    branches: [test/tcp-core-soak-gate-v3]
+  pull_request:
+    branches: [main]
+
+jobs:
+  stability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Repeated functional tests
+        run: |
+          for i in 1 2 3 4 5; do
+            echo "=== functional iteration $i/5 ==="
+            go test -timeout 90s ./...
+          done
+      - name: Repeated race tests
+        run: |
+          for i in 1 2; do
+            echo "=== race iteration $i/2 ==="
+            go test -race -timeout 120s ./...
+          done
+      - name: Vet
+        run: go vet ./...
+      - name: Build server
+        run: go build ./cmd/apt-server
+      - name: Build client
+        run: go build ./cmd/apt-client
