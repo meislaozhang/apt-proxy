@@ -28,6 +28,17 @@ func TestWriteDataWireFlowControl(t *testing.T) {
     ss.streams[streamID] = origin
 
     payload := []byte("wire-flow-control")
+    originRead := make(chan error, 1)
+    go func() {
+        buf := make([]byte, len(payload))
+        _, err := originPeer.Read(buf)
+        if err == nil && string(buf) != string(payload) {
+            originRead <- &payloadMismatch{got: string(buf), want: string(payload)}
+            return
+        }
+        originRead <- err
+    }()
+
     done := make(chan struct{})
     go func() {
         ss.writeData(streamID, payload)
@@ -37,28 +48,21 @@ func TestWriteDataWireFlowControl(t *testing.T) {
     r := bufio.NewReader(peer)
     f1, err := protocol.ReadFrame(r)
     if err != nil { t.Fatal(err) }
-    if f1.Type != protocol.TypeData || f1.StreamID != streamID || string(f1.Payload) != string(payload) {
-        t.Fatalf("unexpected DATA frame: %+v", f1)
+    if f1.Type != protocol.TypeWindowUpdate || f1.StreamID != streamID {
+        t.Fatalf("unexpected first frame: %+v", f1)
     }
     f2, err := protocol.ReadFrame(r)
     if err != nil { t.Fatal(err) }
-    if f2.Type != protocol.TypeWindowUpdate || f2.StreamID != streamID {
-        t.Fatalf("unexpected stream WINDOW_UPDATE: %+v", f2)
+    if f2.Type != protocol.TypeWindowUpdate || f2.StreamID != 0 {
+        t.Fatalf("unexpected second frame: %+v", f2)
     }
-    f3, err := protocol.ReadFrame(r)
-    if err != nil { t.Fatal(err) }
-    if f3.Type != protocol.TypeWindowUpdate || f3.StreamID != 0 {
-        t.Fatalf("unexpected session WINDOW_UPDATE: %+v", f3)
+    if err := <-originRead; err != nil { t.Fatal(err) }
+    select {
+    case <-done:
+    default:
+        t.Fatal("writeData did not finish")
     }
-    if got := string(readExact(t, originPeer, len(payload))); got != string(payload) {
-        t.Fatalf("origin received %q, want %q", got, payload)
-    }
-    <-done
 }
 
-func readExact(t *testing.T, c net.Conn, n int) []byte {
-    t.Helper()
-    b := make([]byte, n)
-    if _, err := c.Read(b); err != nil { t.Fatal(err) }
-    return b
-}
+type payloadMismatch struct{ got, want string }
+func (e *payloadMismatch) Error() string { return "origin payload mismatch: got " + e.got + " want " + e.want }
