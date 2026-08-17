@@ -79,9 +79,19 @@ func(st *stream)Write(p []byte)(int,error){
         n := len(p) - written
         if uint64(n) > maxDataChunk { n = int(maxDataChunk) }
         ctx, cancel := context.WithCancel(context.Background())
-        go func(){ select { case <-st.closed: cancel(); case <-st.sess.done: cancel(); case <-ctx.Done(): } }()
-        if err:=st.send.Acquire(ctx,uint64(n));err!=nil{cancel();return written,err}
-        if err:=st.sess.send.Acquire(ctx,uint64(n));err!=nil{_ = st.send.Add(uint64(n));cancel();return written,err}
+        done := make(chan struct{})
+        go func() {
+            select {
+            case <-st.closed:
+                cancel()
+            case <-st.sess.done:
+                cancel()
+            case <-done:
+            }
+        }()
+        if err:=st.send.Acquire(ctx,uint64(n));err!=nil{close(done);cancel();return written,err}
+        if err:=st.sess.send.Acquire(ctx,uint64(n));err!=nil{_ = st.send.Add(uint64(n));close(done);cancel();return written,err}
+        close(done)
         cancel()
         if err:=st.sess.write(protocol.Frame{Type:protocol.TypeData,StreamID:st.id,Payload:append([]byte(nil),p[written:written+n]...)});err!=nil{return written,err}
         written += n
