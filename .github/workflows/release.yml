@@ -4,37 +4,116 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish'
+        required: false
+        default: ''
 
 permissions:
   contents: write
+
+env:
+  GO_VERSION: '1.23.2'
 
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: ${{ env.GO_VERSION }}
+
       - name: Test
         run: |
+          set -euo pipefail
           go test ./...
           go test -race ./...
           go vet ./...
+
       - name: Build release artifacts
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist
-          for os in linux windows darwin; do
-            for arch in amd64 arm64; do
-              ext=""
-              if [[ "$os" == "windows" ]]; then ext=".exe"; fi
-              GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "dist/apt-server-${os}-${arch}${ext}" ./cmd/apt-server
-              GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "dist/apt-client-${os}-${arch}${ext}" ./cmd/apt-client
-            done
+
+          rm -rf dist package
+          mkdir -p dist package
+
+          build_target() {
+            local label="$1"
+            local goos="$2"
+            local goarch="$3"
+            local goarm="${4:-}"
+            local gomips="${5:-}"
+            local ext="${6:-}"
+
+            local envs=("GOOS=$goos" "GOARCH=$goarch")
+            [[ -n "$goarm" ]] && envs+=("GOARM=$goarm")
+            [[ -n "$gomips" ]] && envs+=("GOMIPS=$gomips")
+
+            local dir="package/apt-proxy-${label}"
+            mkdir -p "$dir"
+
+            env "${envs[@]}" go build -trimpath -ldflags='-s -w' -o "$dir/apt-server${ext}" ./cmd/apt-server
+            env "${envs[@]}" go build -trimpath -ldflags='-s -w' -o "$dir/apt-client${ext}" ./cmd/apt-client
+
+            cp README.md LICENSE "$dir/"
+            printf '%s\n' \
+              "APT Proxy ${GITHUB_REF_NAME:-manual}" \
+              "Target: ${label}" \
+              "Commit: $(git rev-parse HEAD)" \
+              > "$dir/BUILD-INFO.txt"
+
+            tar -C package -czf "dist/apt-proxy-${label}.tar.gz" "apt-proxy-${label}"
+          }
+
+          # Linux targets: common server/desktop architectures plus router/embedded targets.
+          build_target linux-amd64 linux amd64
+          build_target linux-386 linux 386
+          build_target linux-arm64 linux arm64
+          build_target linux-armv7 linux arm 7
+          build_target linux-armv6 linux arm 6
+          build_target linux-mipsle-softfloat linux mipsle '' softfloat
+          build_target linux-mipsle-hardfloat linux mipsle '' hardfloat
+          build_target linux-mips-softfloat linux mips '' softfloat
+          build_target linux-mips-hardfloat linux mips '' hardfloat
+          build_target linux-mips64le linux mips64le
+          build_target linux-mips64 linux mips64
+          build_target linux-riscv64 linux riscv64
+          build_target linux-ppc64le linux ppc64le
+          build_target linux-s390x linux s390x
+
+          # Keep desktop binaries available as standalone files and archives.
+          for target in \
+            'windows-amd64 windows amd64 .exe' \
+            'windows-arm64 windows arm64 .exe' \
+            'darwin-amd64 darwin amd64' \
+            'darwin-arm64 darwin arm64'; do
+            read -r label goos goarch ext <<< "$target"
+            dir="package/apt-proxy-${label}"
+            mkdir -p "$dir"
+            env GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags='-s -w' -o "$dir/apt-server${ext:-}" ./cmd/apt-server
+            env GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags='-s -w' -o "$dir/apt-client${ext:-}" ./cmd/apt-client
+            cp README.md LICENSE "$dir/"
+            printf '%s\n' \
+              "APT Proxy ${GITHUB_REF_NAME:-manual}" \
+              "Target: ${label}" \
+              "Commit: $(git rev-parse HEAD)" \
+              > "$dir/BUILD-INFO.txt"
+            if [[ "$goos" == 'windows' ]]; then
+              (cd package && zip -qr "../dist/apt-proxy-${label}.zip" "apt-proxy-${label}")
+            else
+              tar -C package -czf "dist/apt-proxy-${label}.tar.gz" "apt-proxy-${label}"
+            fi
           done
-          sha256sum dist/* > dist/SHA256SUMS
+
+          (cd dist && sha256sum * > SHA256SUMS)
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
