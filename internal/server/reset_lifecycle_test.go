@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/meislaozhang/apt-proxy/internal/protocol"
 )
@@ -43,6 +44,10 @@ func TestResetClearsStreamLifecycleState(t *testing.T) {
 		close(resetDone)
 	}()
 
+	// Do not race resetDone against frameCh: a successful synchronous Write may
+	// unblock and let reset return before the reader goroutine gets scheduled to
+	// publish its already-received frame. The protocol event is the assertion;
+	// wait for it with a bounded timeout, then wait for reset to finish.
 	select {
 	case result := <-frameCh:
 		if result.err != nil {
@@ -51,11 +56,15 @@ func TestResetClearsStreamLifecycleState(t *testing.T) {
 		if result.frame.Type != protocol.TypeReset || result.frame.StreamID != 7 {
 			t.Fatalf("got frame type=%v stream=%d, want RESET stream=7", result.frame.Type, result.frame.StreamID)
 		}
-	case <-resetDone:
-		t.Fatal("reset returned before RESET frame was observed")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for RESET frame")
 	}
 
-	<-resetDone
+	select {
+	case <-resetDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for reset to finish")
+	}
 
 	ss.mu.Lock()
 	_, streamExists := ss.streams[7]
