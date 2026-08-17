@@ -1,0 +1,36 @@
+name: fast-wire
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  wire-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+      - name: Targeted lifecycle tests
+        run: >-
+          go test -timeout 45s
+          ./internal/server
+          -run 'TestPumpWaitsForSessionWindow|TestResetClearsStreamLifecycleState'
+          -count=1
+
+  protocol-frame:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+      - name: Targeted protocol frame tests
+        run: >-
+          go test -timeout 45s
+          ./internal/protocol
+          -run 'Frame|frame'
+          -count=1
