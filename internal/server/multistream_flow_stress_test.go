@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"sync"
 	"testing"
 
@@ -28,7 +29,7 @@ func Test100StreamsConcurrentFlowWindows(t *testing.T) {
 			defer wg.Done()
 			for r := 0; r < rounds; r++ {
 				const n = uint64(1024)
-				if err := w.Acquire(nilContext{}, n); err != nil {
+				if err := w.Acquire(context.Background(), n); err != nil {
 					t.Errorf("Acquire: %v", err)
 					return
 				}
@@ -41,11 +42,3 @@ func Test100StreamsConcurrentFlowWindows(t *testing.T) {
 	}
 	wg.Wait()
 }
-
-// nilContext is intentionally tiny: BlockingFlowWindow only requires a
-// context-like Done/Err contract for this stress gate.
-type nilContext struct{}
-func (nilContext) Deadline() (time.Time, bool) { return time.Time{}, false }
-func (nilContext) Done() <-chan struct{} { return nil }
-func (nilContext) Err() error { return nil }
-func (nilContext) Value(any) any { return nil }
