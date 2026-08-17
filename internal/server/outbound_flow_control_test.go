@@ -21,8 +21,14 @@ func TestPumpWaitsForSessionWindow(t *testing.T) {
 	defer origin.Close()
 	defer originPeer.Close()
 
-	sessionWindow, err := protocol.NewBlockingFlowWindow(0, 64*1024)
+	// The window implementation rejects an initial credit of zero. Seed one
+	// byte, consume it, and thereby put the pump into the intended zero-credit
+	// state before the payload arrives.
+	sessionWindow, err := protocol.NewBlockingFlowWindow(1, 64*1024)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessionWindow.Acquire(nilContext{}, 1); err != nil {
 		t.Fatal(err)
 	}
 	streamWindow, err := protocol.NewBlockingFlowWindow(64*1024, 64*1024)
@@ -90,3 +96,9 @@ func TestPumpWaitsForSessionWindow(t *testing.T) {
 		t.Fatal("pump did not exit after origin close")
 	}
 }
+
+type nilContext struct{}
+func (nilContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (nilContext) Done() <-chan struct{} { return nil }
+func (nilContext) Err() error { return nil }
+func (nilContext) Value(any) any { return nil }
